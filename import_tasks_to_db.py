@@ -65,17 +65,21 @@ def find_context(current_dir: Path, exam_root: Path) -> tuple[Optional[str], Opt
 
 def iter_exam_tasks(exam_type: str, exam_root: Path, project_root: Path) -> Iterator[dict]:
     for current_dir, _, files in exam_root.walk():
-        if "answer.txt" not in files:
-            continue
-
         current_path = Path(current_dir)
-        answer_text = read_text(current_path / "answer.txt")
+        answer_txt = current_path / "answer.txt"
+        answer_png = current_path / "answer.png"
+
+        # Берём ответ: либо из answer.txt, либо из answer.png (графический)
+        answer_text = read_text(answer_txt)
+        if answer_text is None and answer_png.exists():
+            answer_text = "[графический ответ]"
         if answer_text is None:
             continue
 
         task_text = read_text(current_path / "task.txt")
         task_image = pick_image(current_path, for_context=False)
         context_text, context_image = find_context(current_path, exam_root)
+        answer_image = answer_png if answer_png.exists() else None
 
         relative_dir = to_posix_rel(current_path, exam_root)
         parts = relative_dir.split("/") if relative_dir else []
@@ -97,6 +101,7 @@ def iter_exam_tasks(exam_type: str, exam_root: Path, project_root: Path) -> Iter
             "task_image_path": to_posix_rel(task_image, project_root) if task_image else None,
             "context_text": context_text,
             "context_image_path": to_posix_rel(context_image, project_root) if context_image else None,
+            "answer_image_path": to_posix_rel(answer_image, project_root) if answer_image else None,
         }
 
 
@@ -114,6 +119,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             task_image_path TEXT,
             context_text TEXT,
             context_image_path TEXT,
+            answer_image_path TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(exam_type, source_rel_path)
         );
@@ -134,11 +140,11 @@ def upsert_task(conn: sqlite3.Connection, row: dict) -> None:
         """
         INSERT INTO tasks (
             exam_type, task_number, task_code, source_rel_path,
-            answer_text, task_text, task_image_path, context_text, context_image_path
+            answer_text, task_text, task_image_path, context_text, context_image_path, answer_image_path
         )
         VALUES (
             :exam_type, :task_number, :task_code, :source_rel_path,
-            :answer_text, :task_text, :task_image_path, :context_text, :context_image_path
+            :answer_text, :task_text, :task_image_path, :context_text, :context_image_path, :answer_image_path
         )
         ON CONFLICT(exam_type, source_rel_path) DO UPDATE SET
             task_number = excluded.task_number,
@@ -147,7 +153,8 @@ def upsert_task(conn: sqlite3.Connection, row: dict) -> None:
             task_text = excluded.task_text,
             task_image_path = excluded.task_image_path,
             context_text = excluded.context_text,
-            context_image_path = excluded.context_image_path
+            context_image_path = excluded.context_image_path,
+            answer_image_path = excluded.answer_image_path
         """
     , row)
 

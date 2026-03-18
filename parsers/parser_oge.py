@@ -24,6 +24,14 @@ CONTEXT_RE = re.compile(
 ANSWER_RE = re.compile(
     r"№\s*(\d+\.\d+(?:\.\d+)?)\s+(.+)"
 )
+ANSWER_BLOCK_RE = re.compile(r"№\s*(\d+\.\d+(?:\.\d+)?)")
+# Обрезка ответов 20-25: все от rect.x0,y0 (левый верх №)
+# Правая граница: ищем точку "." в конце ответа, берём её x1 + ANSWER_DOT_MARGIN
+ANSWER_LEFT = 58            # отступ слева от rect.x0
+ANSWER_DOT_MARGIN = 10      # отступ справа от точки в конце ответа
+ANSWER_WIDTH = 250          # fallback, если точку не нашли
+ANSWER_TOP = -9             # отступ верха от rect.y0
+ANSWER_HEIGHT = 37          # высота вырезки
 
 current_group = None
 
@@ -132,19 +140,32 @@ def crop_task_11(page, blocks, rect, tasks, index):
     return fitz.Rect(left, top, right, bottom)
 
 
-# специальная обрезка для задачи 24 (нет "Ответ:")
-def crop_task_24(page, rect, tasks, index):
-
+# специальная обрезка для задачи 24 (нет "Ответ:"): до след. задания или Оглавления
+def crop_task_24(page, blocks, rect, tasks, index):
     top = rect.y0 - TOP_PADDING
+    left = LEFT
+    right = page.rect.width - RIGHT
 
     if index + 1 < len(tasks):
         next_rect = tasks[index + 1][1]
         bottom = next_rect.y0 - 30
     else:
-        bottom = rect.y0 + 400
-
-    left = LEFT
-    right = page.rect.width - RIGHT
+        footer_top = None
+        for b in blocks:
+            txt = (b[4] if len(b) > 4 else "").strip()
+            if not txt:
+                continue
+            r = fitz.Rect(b[:4])
+            is_footer = (
+                re.search(r"Оглавл", txt, re.IGNORECASE)
+                or re.search(r"Справоч", txt, re.IGNORECASE)
+                or "<<" in txt
+                or ">>" in txt
+            )
+            if is_footer:
+                footer_top = r.y0 if footer_top is None else min(footer_top, r.y0)
+        bottom = footer_top - 6 if footer_top is not None else rect.y0 + 400
+        bottom = max(bottom, top + 100)
 
     return fitz.Rect(left, top, right, bottom)
 
@@ -284,6 +305,94 @@ def save_answer_text(answer, folder):
         f.write(answer)
 
 
+def save_answer_image(task, pix):
+    if pix is None:
+        return
+    folder = get_task_folder(task)
+    ensure(folder)
+    try:
+        pix.save(os.path.join(folder, "answer.png"))
+        txt_path = os.path.join(folder, "answer.txt")
+        if os.path.exists(txt_path):
+            os.remove(txt_path)
+    except Exception:
+        pass
+
+
+def _find_next_no_x(blocks, current_rect, line_tolerance=5):
+    """Левый край следующего блока «№ X.Y» на той же строке."""
+    for b in blocks:
+        if not ANSWER_BLOCK_RE.search(b[4]):
+            continue
+        r = fitz.Rect(b[:4])
+        if r.x0 <= current_rect.x0:
+            continue
+        if abs(r.y0 - current_rect.y0) > line_tolerance:
+            continue
+        return r.x0
+    return None
+
+
+def _find_dot_right(page, blocks, rect, line_tolerance=4):
+    """Правый край точки '.' в конце НАШЕГО ответа (ближайшая точка, не следующего)."""
+    words = page.get_text("words")
+    next_x = _find_next_no_x(blocks, rect)
+    best_x1 = None
+    for w in words:
+        x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
+        if x0 <= rect.x1:
+            continue
+        if next_x is not None and x1 >= next_x:
+            continue
+        if abs((y0 + y1) / 2 - (rect.y0 + rect.y1) / 2) > line_tolerance:
+            continue
+        if not (word.endswith(".") or word == "."):
+            continue
+        if re.match(r"^[\d\.]+$", word):
+            continue
+        if best_x1 is None or x1 < best_x1:
+            best_x1 = x1
+    return best_x1
+
+
+def find_answer_images(doc):
+    """Ответы картинкой для 20-25: обрезка по номерку слева, справа — до точки + margin."""
+    answers = {}
+    for page_i in range(len(doc)):
+        page = doc.load_page(page_i)
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            m = ANSWER_BLOCK_RE.search(b[4])
+            if not m:
+                continue
+            task = m.group(1)
+            n = int(task.split(".")[0])
+            if n < 20 or n > 25:
+                continue
+            rect = fitz.Rect(b[:4])
+            left = max(0, rect.x0 + ANSWER_LEFT)
+            top = max(0, rect.y0 + ANSWER_TOP)
+            bottom = min(page.rect.height, top + ANSWER_HEIGHT)
+            dot_x1 = _find_dot_right(page, blocks, rect)
+            right = (dot_x1 + ANSWER_DOT_MARGIN) if dot_x1 is not None else (left + ANSWER_WIDTH)
+            right = min(page.rect.width, right)
+            if right - left < 20 or bottom - top < 15:
+                continue
+            clip = fitz.Rect(left, top, right, bottom)
+            try:
+                pix = render(page, clip)
+                answers[task] = pix
+            except Exception:
+                continue
+    return answers
+
+
+def save_task_text(task, text, folder):
+    ensure(folder)
+    with open(os.path.join(folder, "task.txt"), "w", encoding="utf-8") as f:
+        f.write((text or "").strip())
+
+
 def get_task_folder(task):
 
     parts = task.split(".")
@@ -305,20 +414,35 @@ def get_task_folder(task):
     )
 
 
-def save_task(task, pix, answers):
+def save_task(task, pix, answers, folder=None):
 
-    folder = get_task_folder(task)
+    folder = folder or get_task_folder(task)
 
     ensure(folder)
 
     pix.save(os.path.join(folder, "task.png"))
 
+    n = int(task.split(".")[0])
+    if 20 <= n <= 25:
+        return  # ответы 20-25 только в .png
     if task in answers:
+        save_answer_text(answers[task], folder)
 
-        save_answer_text(
-            answers[task],
-            folder
-        )
+
+def save_task_24_as_image(page, blocks, task, rect, tasks, index, folder):
+    """Задание 24: сохраняем картинкой (нижняя граница — до след. задания или Оглавления)."""
+    clip = crop_task_24(page, blocks, rect, tasks, index)
+    if clip is None:
+        return False
+    try:
+        pix = render(page, clip)
+        pix.save(os.path.join(folder, "task.png"))
+        txt_path = os.path.join(folder, "task.txt")
+        if os.path.exists(txt_path):
+            os.remove(txt_path)
+        return True
+    except Exception:
+        return False
 
 
 def main():
@@ -330,6 +454,7 @@ def main():
     doc = fitz.open(PDF)
 
     answers = parse_answers(doc)
+    answer_images = find_answer_images(doc)
 
     task_count = 0
 
@@ -365,13 +490,23 @@ def main():
 
             n = int(task.split(".")[0])
 
-            if n > 19:
+            if n > 25:
+                continue
+
+            folder = get_task_folder(task)
+            ensure(folder)
+
+            if n == 24:
+                if save_task_24_as_image(page, blocks, task, rect, tasks, i, folder):
+                    task_count += 1
+                    if task in answer_images:
+                        save_answer_image(task, answer_images[task])
+                    else:
+                        save_answer_text("[ответа нет]", folder)
                 continue
 
             if n == 11:
                 clip = crop_task_11(page, blocks, rect, tasks, i)
-            elif n == 24:
-                clip = crop_task_24(page, rect, tasks, i)
             else:
                 clip = crop_task(page, blocks, rect)
 
@@ -380,7 +515,13 @@ def main():
 
             pix = render(page, clip)
 
-            save_task(task, pix, answers)
+            save_task(task, pix, answers, folder)
+
+            if 20 <= n <= 25:
+                if task in answer_images:
+                    save_answer_image(task, answer_images[task])
+            elif task in answers:
+                save_answer_text(answers[task], folder)
 
             task_count += 1
 

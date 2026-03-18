@@ -112,10 +112,16 @@ def is_answer_correct(
     expected: str,
     exam_type: str,
     task_number: str,
-) -> bool:
+    *,
+    has_graphical_answer: bool = False,
+) -> Optional[bool]:
     """
-    Проверка ответа. Для ЕГЭ База задание 19: ответ — одно из чисел через запятую.
+    Проверка ответа. Возвращает True/False или None если проверка невозможна (графический ответ, нет ответа).
     """
+    exp = (expected or "").strip()
+    if has_graphical_answer or exp == "[графический ответ]" or exp == "[ответа нет]":
+        return None
+
     u = normalize_answer(user_answer)
     e = str(expected or "").strip()
     if not e:
@@ -277,7 +283,7 @@ def write_variant_files(tg_user_id: int, variant_id: int, tasks: list[TaskRow]) 
         PROJECT_ROOT,
         include_answers=False,
     )
-    write_answers_pdf(answers_file, f"Вариант {variant_id} - ответы", tasks)
+    write_answers_pdf(answers_file, f"Вариант {variant_id} - ответы", tasks, PROJECT_ROOT)
     write_tasks_pdf(
         full_file,
         f"Вариант {variant_id} - задания и ответы",
@@ -473,13 +479,6 @@ def stats_icon(percent: float) -> str:
     return "🔴"
 
 
-def group_key(source_rel_path: str) -> str:
-    parts = source_rel_path.split("/")
-    if len(parts) <= 1:
-        return source_rel_path
-    return "/".join(parts[:-1])
-
-
 def normalize_text_for_output(text: str) -> str:
     text = (text or "").replace("\r", "").replace("\u00ad", "")
     # Переносы с дефисом: "вы-\nсоте" -> "высоте"
@@ -501,15 +500,11 @@ def is_oge_1_5_row(row) -> bool:
 
 
 def should_show_context_for_row(rows: list, position: int) -> bool:
+    """Кликабельный вариант: для ОГЭ 1-5 контекст у всех заданий 1-5. Остальное — по умолчанию."""
     row = rows[position - 1]
     if not is_oge_1_5_row(row):
         return True
-    if position == 1:
-        return True
-    prev = rows[position - 2]
-    if not is_oge_1_5_row(prev):
-        return True
-    return group_key(str(row["source_rel_path"])) != group_key(str(prev["source_rel_path"]))
+    return True  # ОГЭ 1-5: контекст у каждого задания 1-5 в кликабельном варианте
 
 
 def render_clickable_task_text(row, position: int, total: int, show_answer: bool, show_context: bool) -> str:
@@ -519,7 +514,14 @@ def render_clickable_task_text(row, position: int, total: int, show_answer: bool
     if row["task_text"]:
         parts.append(html.escape(normalize_text_for_output(str(row["task_text"]))))
     if show_answer:
-        parts.append(f"<b>Ответ:</b> {html.escape(str(row['answer_text'] or ''))}")
+        ans_text = str((row["answer_text"] if "answer_text" in row.keys() else None) or "").strip()
+        ans_img = row["answer_image_path"] if "answer_image_path" in row.keys() else None
+        if ans_text == "[ответа нет]":
+            parts.append("<b>Ответ:</b> Ответа нет.")
+        elif ans_img and ans_text == "[графический ответ]":
+            parts.append("<b>Ответ:</b> [см. изображение]")
+        else:
+            parts.append(f"<b>Ответ:</b> {html.escape(ans_text or '')}")
     return "\n\n".join(parts)
 
 
@@ -722,14 +724,31 @@ async def send_task_from_variant(callback: CallbackQuery, variant_id: int, posit
         row=row,
         show_context=show_context,
         edit=True,
+        show_answer=show_answer,
     )
 
 
-def primary_image_for_clickable(row, show_context: bool) -> Optional[Path]:
+def primary_image_for_clickable(row, show_context: bool, show_answer: bool = False) -> Optional[Path]:
+    answer_image_path = row["answer_image_path"] if "answer_image_path" in row.keys() else None
+    ans_img = PROJECT_ROOT / str(answer_image_path) if answer_image_path else None
     task_image_path = row["task_image_path"]
     context_image_path = row["context_image_path"]
     task_img = PROJECT_ROOT / str(task_image_path) if task_image_path else None
     ctx_img = PROJECT_ROOT / str(context_image_path) if context_image_path else None
+
+    exam = str(row["exam_type"]) if "exam_type" in row.keys() else ""
+    task_num = str(row["task_number"]) if "task_number" in row.keys() else ""
+    ans_txt = str((row["answer_text"] if "answer_text" in row.keys() else None) or "").strip()
+    is_oge_24_no_answer = exam == "oge" and task_num == "24" and ans_txt == "[ответа нет]"
+    if show_answer and ans_img and ans_img.exists() and not is_oge_24_no_answer:
+        base_img = None
+        if show_context and is_oge_1_5_row(row) and task_img and ctx_img and task_img.exists() and ctx_img.exists():
+            base_img = build_combined_image(ctx_img, task_img, row["source_rel_path"])
+        elif task_img and task_img.exists():
+            base_img = task_img
+        if base_img:
+            return build_task_answer_image(base_img, ans_img)
+        return ans_img
 
     if (
         show_context
@@ -774,6 +793,33 @@ def build_combined_image(context_img: Path, task_img: Path, source_rel_path: str
         return task_img
 
 
+def build_task_answer_image(task_img: Path, ans_img: Path, key_suffix: str = "") -> Optional[Path]:
+    """Склеивает задание и ответ (графический) в одну картинку."""
+    cache_dir = GENERATED_DIR / "combined_images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(f"{task_img}|{ans_img}|{key_suffix}".encode("utf-8")).hexdigest()
+    out_path = cache_dir / f"{key}.png"
+    if out_path.exists():
+        return out_path
+
+    try:
+        with Image.open(task_img) as timg, Image.open(ans_img) as aimg:
+            timg = timg.convert("RGB")
+            aimg = aimg.convert("RGB")
+            width = max(timg.width, aimg.width)
+            pad = 24
+            total_height = timg.height + aimg.height + pad
+            canvas = Image.new("RGB", (width, total_height), color=(255, 255, 255))
+            tx = (width - timg.width) // 2
+            ax = (width - aimg.width) // 2
+            canvas.paste(timg, (tx, 0))
+            canvas.paste(aimg, (ax, timg.height + pad))
+            canvas.save(out_path, format="PNG")
+        return out_path
+    except Exception:
+        return task_img
+
+
 async def send_or_edit_clickable_message(
     message: Message,
     text: str,
@@ -781,8 +827,9 @@ async def send_or_edit_clickable_message(
     row,
     show_context: bool,
     edit: bool,
+    show_answer: bool = False,
 ) -> None:
-    image_path = primary_image_for_clickable(row, show_context)
+    image_path = primary_image_for_clickable(row, show_context, show_answer)
     if edit:
         try:
             if image_path:
@@ -1304,8 +1351,10 @@ async def process_answer(message: Message, state: FSMContext) -> None:
     row = rows[idx]
     user_answer = message.text.strip()
     expected = str(row["answer_text"] or "")
+    has_graphical = bool(row["answer_image_path"] if "answer_image_path" in row.keys() else None) and expected.strip() == "[графический ответ]"
     is_correct = is_answer_correct(
-        user_answer, expected, str(row["exam_type"]), str(row["task_number"])
+        user_answer, expected, str(row["exam_type"]), str(row["task_number"]),
+        has_graphical_answer=has_graphical,
     )
     logger.info(
         "Answer checked user=%s variant_item=%s task_number=%s correct=%s",
@@ -1314,6 +1363,16 @@ async def process_answer(message: Message, state: FSMContext) -> None:
         row["task_number"],
         is_correct,
     )
+
+    if is_correct is None:
+        if str((row["answer_text"] if "answer_text" in row.keys() else None) or "").strip() == "[ответа нет]":
+            await message.answer("Ответа нет у этого задания.")
+        else:
+            await message.answer("Проверьте ответ по PDF с ответами.")
+        idx += 1
+        await state.update_data(idx=idx)
+        await ask_next_answer(message, state)
+        return
 
     db.update_answer(int(row["variant_item_id"]), user_answer, is_correct)
     user_db_row = db.get_user(message.from_user.id)

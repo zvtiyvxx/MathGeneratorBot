@@ -1,0 +1,11 @@
+2026-03-14 12:29:28,587 | INFO | math_generator_bot | Bot starting polling
+2026-03-14 12:29:28,593 | INFO | aiogram.dispatcher | Start polling
+2026-03-14 12:29:28,983 | INFO | aiogram.dispatcher | Run polling for bot @ExamMathGeneratorBot id=8724247602 - 'MathGeneratorBot'
+2026-03-14 12:29:29,054 | INFO | math_generator_bot | Start command user=855239776
+2026-03-14 12:29:29,374 | INFO | aiogram.event | Update id=64979318 is handled. Duration 313 ms by bot id=8724247602
+2026-03-14 12:29:33,647 | INFO | math_generator_bot | Exam selected user=855239776 exam=ege_profile
+2026-03-14 12:29:33,813 | INFO | aiogram.event | Update id=64979319 is handled. Duration 171 ms by bot id=8724247602
+2026-03-14 12:29:44,819 | INFO | aiogram.dispatcher | Polling stopped
+2026-03-14 12:29:44,819 | ERROR | aiogram.dispatcher | Failed to fetch updates - TelegramNetworkError: HTTP Client says - ServerDisconnectedError: Server disconnected
+2026-03-14 12:29:44,819 | WARNING | aiogram.dispatcher | Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 8724247602)
+2026-03-14 12:29:45,074 | INFO | aiogram.dispatcher | Polling stopped for bot @ExamMathGeneratorBot id=8724247602 - 'MathGeneratorBot'

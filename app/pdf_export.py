@@ -192,12 +192,17 @@ def write_tasks_pdf(file_path: Path, title: str, tasks: list, project_root: Path
         _draw_line(ctx, "Ответы", size=HEADING_FONT_SIZE, line_height=HEADING_LINE_HEIGHT)
         _draw_line(ctx, "")
         for idx, task in enumerate(tasks, start=1):
-            _draw_line(ctx, f"{idx}. {task.answer_text}")
+            if getattr(task, "answer_image_path", None) and (task.answer_text or "").strip() == "[графический ответ]":
+                _draw_line(ctx, f"{idx}.", size=HEADING_FONT_SIZE, line_height=HEADING_LINE_HEIGHT)
+                _draw_image(ctx, project_root / task.answer_image_path)
+                _draw_line(ctx, "")
+            else:
+                _draw_line(ctx, f"{idx}. {task.answer_text}")
 
     pdf.save()
 
 
-def write_answers_pdf(file_path: Path, title: str, tasks: list) -> None:
+def write_answers_pdf(file_path: Path, title: str, tasks: list, project_root: Path) -> None:
     _register_font()
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -210,6 +215,11 @@ def write_answers_pdf(file_path: Path, title: str, tasks: list) -> None:
     _draw_line(ctx, "")
 
     for idx, task in enumerate(tasks, start=1):
-        _draw_line(ctx, f"{idx}. {task.answer_text}")
+        if getattr(task, "answer_image_path", None) and (task.answer_text or "").strip() == "[графический ответ]":
+            _draw_line(ctx, f"{idx}.", size=HEADING_FONT_SIZE, line_height=HEADING_LINE_HEIGHT)
+            _draw_image(ctx, project_root / task.answer_image_path)
+            _draw_line(ctx, "")
+        else:
+            _draw_line(ctx, f"{idx}. {task.answer_text}")
 
     pdf.save()

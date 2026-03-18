@@ -16,6 +16,7 @@ class TaskRow:
     task_image_path: Optional[str]
     context_text: Optional[str]
     context_image_path: Optional[str]
+    answer_image_path: Optional[str] = None
 
 
 class BotDB:
@@ -44,6 +45,7 @@ class BotDB:
                 task_image_path TEXT,
                 context_text TEXT,
                 context_image_path TEXT,
+                answer_image_path TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(exam_type, source_rel_path)
             );
@@ -106,6 +108,10 @@ class BotDB:
                 ON attempts (user_id, exam_type, task_number);
             """
         )
+        try:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN answer_image_path TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def upsert_user(self, tg_user_id: int, username: Optional[str], first_name: Optional[str]) -> int:
@@ -337,11 +343,17 @@ class BotDB:
         self.conn.commit()
 
     def get_wrong_task_ids(self, user_id: int, exam_type: str, limit: int) -> list[int]:
+        exclude = ""
+        if exam_type == "ege_profile":
+            exclude = " AND task_number NOT IN ('13','14','15','16','17','18','19')"
+        elif exam_type == "oge":
+            exclude = " AND task_number NOT IN ('20','21','22','23','24','25')"
         rows = self.conn.execute(
-            """
+            f"""
             SELECT DISTINCT task_id
             FROM attempts
             WHERE user_id = ? AND exam_type = ? AND is_correct = 0
+            {exclude}
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -350,14 +362,20 @@ class BotDB:
         return [int(r["task_id"]) for r in rows]
 
     def get_stats(self, user_id: int, exam_type: str) -> list[sqlite3.Row]:
+        exclude = ""
+        if exam_type == "ege_profile":
+            exclude = " AND task_number NOT IN ('13','14','15','16','17','18','19')"
+        elif exam_type == "oge":
+            exclude = " AND task_number NOT IN ('20','21','22','23','24','25')"
         return self.conn.execute(
-            """
+            f"""
             SELECT
                 task_number,
                 COUNT(*) AS total_attempts,
                 SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) AS correct_attempts
             FROM attempts
             WHERE user_id = ? AND exam_type = ?
+            {exclude}
             GROUP BY task_number
             """,
             (user_id, exam_type),
@@ -417,4 +435,5 @@ class BotDB:
             task_image_path=row["task_image_path"],
             context_text=row["context_text"],
             context_image_path=row["context_image_path"],
+            answer_image_path=row["answer_image_path"] if "answer_image_path" in row.keys() else None,
         )
